@@ -1,0 +1,40 @@
+/* Kombi Backup — usa los colores del esquema de administración activo. */
+.kb-wrap { max-width: 1100px; }
+.kb-lead { font-size: 14px; max-width: 70ch; }
+.kb-muted { color: #646970; }
+.kb-error { color: #b32d2e; }
+.kb-h2 { margin-top: 2em; }
+
+.kb-cards { display: grid; grid-template-columns: repeat( auto-fit, minmax( 300px, 1fr ) ); gap: 16px; margin: 16px 0; }
+.kb-card { background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; padding: 4px 20px 12px; }
+.kb-card ol { padding-left: 1.2em; }
+.kb-card li { margin-bottom: .4em; }
+
+.kb-progress { background: #fff; border: 1px solid #c3c4c7; border-left: 4px solid var( --wp-admin-theme-color, #2271b1 ); border-radius: 6px; padding: 12px 20px; margin: 16px 0; }
+.kb-progress.is-done { border-left-color: #00a32a; }
+.kb-progress.is-error { border-left-color: #d63638; }
+.kb-progress.is-error #kb-progress-label { color: #b32d2e; font-weight: 600; }
+.kb-progress__head { display: flex; justify-content: space-between; gap: 1em; }
+.kb-progress progress { width: 100%; height: 12px; margin: 8px 0 0; accent-color: var( --wp-admin-theme-color, #2271b1 ); }
+
+.kb-log { max-height: 160px; overflow: auto; margin: 0; font: 12px/1.5 Consolas, Monaco, monospace; color: #646970; }
+.kb-log:empty { display: none; }
+
+.kb-table td { vertical-align: middle; }
+.kb-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.kb-key { user-select: all; }
+.kb-tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 10px; background: #dcdcde; margin-left: 4px; }
+.kb-notes td { padding-top: 0; }
+.kb-notes summary { cursor: pointer; color: #646970; }
+.kb-delete { color: #b32d2e !important; }
+
+.kb-dialog { max-width: 560px; border: 0; border-radius: 8px; padding: 8px 24px 20px; box-shadow: 0 10px 40px rgba( 0, 0, 0, .3 ); }
+.kb-dialog::backdrop { background: rgba( 0, 0, 0, .5 ); }
+.kb-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.button.kb-danger { background: #d63638; border-color: #d63638; }
+.button.kb-danger:hover, .button.kb-danger:focus { background: #b32d2e; border-color: #b32d2e; }
+
+@media ( max-width: 782px ) {
+	.kb-table thead { display: none; }
+	.kb-table td { display: block; }
+}
