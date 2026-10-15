@@ -46,7 +46,7 @@
 		box.scrollIntoView( { behavior: 'smooth', block: 'center' } );
 	}
 	function render( p ) {
-		$( '#kb-progress-bar' ).value = p.percent;
+		$( '#kb-progress-bar' ).style.width = p.percent + '%';
 		$( '#kb-progress-pct' ).textContent = Math.round( p.percent ) + '%';
 		$( '#kb-progress-label' ).textContent = p.label || '';
 		if ( p.log && p.log.length ) {
@@ -64,7 +64,7 @@
 		busy( false );
 	}
 	function busy( on ) {
-		document.querySelectorAll( '.kb-wrap button' ).forEach( function ( b ) { b.disabled = on; } );
+		document.querySelectorAll( '.kb-wrap button, #kb-file' ).forEach( function ( b ) { b.disabled = on; } );
 	}
 
 	/** Llama "step" hasta terminar; reintenta cortes de red/timeouts (el servidor retoma). */
@@ -102,14 +102,20 @@
 	$( '#kb-start' ).addEventListener( 'click', function () {
 		backup( 'Creando respaldo…' ).then( function ( p ) {
 			box.classList.add( 'is-done' );
-			$( '#kb-progress-title' ).textContent = 'Respaldo listo. Clave del instalador: ' + p.key;
-			setTimeout( function () { location.reload(); }, 2500 );
+			$( '#kb-progress-title' ).textContent = 'Respaldo listo.';
+			location.href = cfg.page + '&kb_new=' + encodeURIComponent( p.id );
 		} ).catch( fail );
 	} );
 
 	document.addEventListener( 'click', function ( ev ) {
 		var t = ev.target;
-		var row = t.closest( 'tr[data-id]' );
+		var row = t.closest( '[data-id]' );
+		t = t.closest( 'button' ) || t;
+		document.querySelectorAll( '.kb-menu[open]' ).forEach( function ( m ) {
+			if ( ! m.contains( ev.target ) || t.closest( '.kb-menu__panel' ) ) {
+				m.open = false;
+			}
+		} );
 
 		if ( t.classList.contains( 'kb-copy' ) ) {
 			navigator.clipboard.writeText( t.dataset.copy ).then( function () {
@@ -123,10 +129,6 @@
 				return;
 			}
 			post( 'delete', { id: row.dataset.id } ).then( function () {
-				var notes = row.nextElementSibling;
-				if ( notes && notes.classList.contains( 'kb-notes' ) ) {
-					notes.remove();
-				}
 				row.remove();
 			} ).catch( fail );
 		}
@@ -162,16 +164,16 @@
 		} );
 	}
 
-	/* Subida por trozos ------------------------------------------------- */
+	/* Subida por trozos (al elegir o soltar el archivo) ------------------ */
 
-	$( '#kb-upload' ).addEventListener( 'click', function () {
-		var file = $( '#kb-file' ).files[ 0 ];
-		if ( ! file ) {
-			$( '#kb-file' ).click();
+	function upload( file ) {
+		if ( ! /\.zip$/i.test( file.name ) ) {
+			fail( new Error( 'Elige un archivo .zip creado con Kombi Backup.' ) );
 			return;
 		}
 		var id = Array.from( crypto.getRandomValues( new Uint8Array( 12 ) ), function ( b ) { return b.toString( 16 ).padStart( 2, '0' ); } ).join( '' );
 		var total = Math.max( 1, Math.ceil( file.size / cfg.chunk ) );
+		var mb = function ( b ) { return ( b / 1048576 ).toFixed( b < 104857600 ? 1 : 0 ) + ' MB'; };
 		var i = 0;
 		var fails = 0;
 		show( 'Subiendo ' + file.name + '…' );
@@ -182,11 +184,11 @@
 			fd.append( 'index', i );
 			fd.append( 'total', total );
 			fd.append( 'chunk', file.slice( i * cfg.chunk, ( i + 1 ) * cfg.chunk ), 'chunk' );
-			return post( 'upload', fd ).then( function () {
+			return post( 'upload', fd ).then( function ( r ) {
 				fails = 0;
 				i++;
-				render( { percent: 100 * i / total, label: Math.round( Math.min( file.size, i * cfg.chunk ) / 1048576 ) + ' de ' + Math.round( file.size / 1048576 ) + ' MB' } );
-				return i < total ? next() : null;
+				render( { percent: 100 * i / total, label: mb( Math.min( file.size, i * cfg.chunk ) ) + ' de ' + mb( file.size ) } );
+				return i < total ? next() : r;
 			}, function ( e ) {
 				if ( ! e.retry || ++fails > 4 ) {
 					throw e;
@@ -194,11 +196,33 @@
 				return sleep( 2000 * fails ).then( next );
 			} );
 		};
-		next().then( function () {
+		next().then( function ( r ) {
 			box.classList.add( 'is-done' );
 			$( '#kb-progress-title' ).textContent = 'Respaldo subido.';
-			setTimeout( function () { location.reload(); }, 1200 );
+			location.href = cfg.page + '&kb_new=' + encodeURIComponent( r.id );
 		} ).catch( fail );
+	}
+
+	var drop = $( '#kb-drop' );
+	$( '#kb-file' ).addEventListener( 'change', function () {
+		if ( this.files[ 0 ] ) {
+			upload( this.files[ 0 ] );
+		}
+	} );
+	[ 'dragenter', 'dragover' ].forEach( function ( type ) {
+		drop.addEventListener( type, function ( ev ) {
+			ev.preventDefault();
+			drop.classList.add( 'is-over' );
+		} );
+	} );
+	[ 'dragleave', 'drop' ].forEach( function ( type ) {
+		drop.addEventListener( type, function () { drop.classList.remove( 'is-over' ); } );
+	} );
+	drop.addEventListener( 'drop', function ( ev ) {
+		ev.preventDefault();
+		if ( ev.dataTransfer.files[ 0 ] ) {
+			upload( ev.dataTransfer.files[ 0 ] );
+		}
 	} );
 
 	/* Exclusiones ------------------------------------------------------- */

@@ -42,6 +42,7 @@ class Kombi_Backup_Admin {
 			array(
 				'ajax'  => admin_url( 'admin-ajax.php' ),
 				'nonce' => wp_create_nonce( 'kombi_backup' ),
+				'page'  => admin_url( 'tools.php?page=' . self::SLUG ),
 				// Trozos bajo el límite de subida de PHP: así se pueden subir respaldos de varios GB.
 				'chunk' => (int) max( 262144, min( 8388608, $max ? floor( $max * 0.8 ) : 1048576 ) ),
 			)
@@ -53,134 +54,187 @@ class Kombi_Backup_Admin {
 	 * ------------------------------------------------------------------ */
 
 	public static function render() {
-		$jobs     = Kombi_Backup_Job::all();
-		$excludes = implode( "\n", Kombi_Backup_Job::excludes() );
-		$dl       = wp_nonce_url( admin_url( 'admin-post.php?action=kombi_backup_download' ), 'kombi_backup_download' );
+		$jobs   = Kombi_Backup_Job::all();
+		$done   = array_values(
+			array_filter(
+				$jobs,
+				function ( $j ) {
+					return 'done' === $j->meta['status'];
+				}
+			)
+		);
+		$last   = $done ? $done[0] : null;
+		$dl     = wp_nonce_url( admin_url( 'admin-post.php?action=kombi_backup_download' ), 'kombi_backup_download' );
+		$new_id = isset( $_GET['kb_new'] ) ? sanitize_text_field( wp_unslash( $_GET['kb_new'] ) ) : '';
 		?>
 		<div class="wrap kb-wrap">
-			<h1>Kombi Backup</h1>
-			<p class="kb-lead">Respaldo completo de este WordPress (archivos y base de datos) en un solo <code>.zip</code>. Con el instalador se levanta en otro servidor; desde aquí también puedes restaurar un respaldo sobre este sitio.</p>
+			<h1 class="screen-reader-text">Kombi Backup</h1>
+
+			<header class="kb-hero">
+				<div class="kb-hero__brand">
+					<span class="kb-logo"><?php echo self::logo(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SVG propio del plugin. ?></span>
+					<span class="kb-hero__name">Backup</span>
+				</div>
+				<div class="kb-hero__body">
+					<p class="kb-hero__title">
+						<?php if ( $last ) : ?>
+							<span class="kb-dot" aria-hidden="true"></span> Último respaldo hace <?php echo esc_html( human_time_diff( $last->meta['created'] ) ); ?>
+						<?php else : ?>
+							<span class="kb-dot kb-dot--warn" aria-hidden="true"></span> Este sitio todavía no tiene respaldos
+						<?php endif; ?>
+					</p>
+					<p class="kb-hero__text">Copia completa del sitio: archivos y base de datos en un solo archivo. Sirve para recuperarlo si algo falla o para llevarlo a otro servidor.</p>
+				</div>
+				<div class="kb-hero__cta">
+					<button type="button" class="kb-btn kb-btn--primary kb-btn--big" id="kb-start" <?php disabled( is_multisite() ); ?>>
+						<span class="dashicons dashicons-backup" aria-hidden="true"></span> Crear respaldo
+					</button>
+					<span class="kb-hero__hint">Tarda unos minutos. Puedes seguir usando el sitio.</span>
+				</div>
+			</header>
 
 			<?php if ( is_multisite() ) : ?>
-				<div class="notice notice-error"><p>Multisitio todavía no está soportado.</p></div>
+				<div class="notice notice-error inline"><p>Multisitio todavía no está soportado.</p></div>
 			<?php endif; ?>
 
-			<div class="kb-cards">
-				<section class="kb-card">
-					<h2>Crear respaldo</h2>
-					<p>Incluye todo lo que hay en la carpeta de WordPress y las tablas con prefijo <code><?php echo esc_html( $GLOBALS['wpdb']->prefix ); ?></code>. Puedes seguir usando el sitio mientras se crea.</p>
-					<p><button type="button" class="button button-primary button-hero" id="kb-start">Crear respaldo ahora</button></p>
-				</section>
-				<section class="kb-card">
-					<h2>Subir un respaldo</h2>
-					<p>Sube un <code>.zip</code> creado con Kombi Backup en otro sitio (por ejemplo, la versión nueva preparada en local) para restaurarlo aquí.</p>
-					<p><input type="file" id="kb-file" accept=".zip,application/zip"> <button type="button" class="button" id="kb-upload">Subir</button></p>
-				</section>
-			</div>
-
-			<div class="kb-progress" id="kb-progress" hidden>
+			<div class="kb-progress" id="kb-progress" hidden role="status" aria-live="polite">
 				<div class="kb-progress__head"><strong id="kb-progress-title">Creando respaldo…</strong> <span id="kb-progress-pct">0%</span></div>
-				<progress id="kb-progress-bar" max="100" value="0"></progress>
+				<div class="kb-bar"><span id="kb-progress-bar"></span></div>
 				<p id="kb-progress-label" class="kb-muted"></p>
 				<ul id="kb-progress-log" class="kb-log"></ul>
 			</div>
 
-			<h2 class="kb-h2">Respaldos</h2>
-			<?php if ( ! $jobs ) : ?>
-				<p class="kb-muted">Todavía no hay respaldos.</p>
-			<?php else : ?>
-				<table class="widefat striped kb-table">
-					<thead><tr><th>Fecha</th><th>Origen</th><th>Tamaño</th><th>Clave del instalador</th><th>Acciones</th></tr></thead>
-					<tbody>
+			<div class="kb-layout">
+				<div class="kb-main">
+					<h2 class="kb-section-title">Tus respaldos<?php if ( $jobs ) : ?> <span class="kb-count"><?php echo (int) count( $jobs ); ?></span><?php endif; ?></h2>
+
+					<?php if ( ! $jobs ) : ?>
+						<div class="kb-empty">
+							<span class="dashicons dashicons-cloud-saved" aria-hidden="true"></span>
+							<p><strong>Aún no hay respaldos.</strong><br>Crea el primero con el botón de arriba.</p>
+						</div>
+					<?php endif; ?>
+
+					<ul class="kb-list">
 					<?php foreach ( $jobs as $job ) : ?>
 						<?php
-						$m    = $job->meta;
-						$link = add_query_arg( 'id', $job->id, $dl );
+						$m     = $job->meta;
+						$link  = add_query_arg( 'id', $job->id, $dl );
+						$host  = preg_replace( '#^https?://#', '', $m['home'] );
+						$class = 'kb-item' . ( $job->id === $new_id ? ' is-new' : '' ) . ( 'done' !== $m['status'] ? ' is-' . $m['status'] : '' );
+						$icon  = 'done' === $m['status'] ? 'dashicons-archive' : ( 'error' === $m['status'] ? 'dashicons-warning' : 'dashicons-update' );
 						?>
-						<tr data-id="<?php echo esc_attr( $job->id ); ?>">
-							<td><?php echo esc_html( wp_date( 'j M Y, H:i', $m['created'] ) ); ?></td>
-							<td>
-								<?php echo esc_html( preg_replace( '#^https?://#', '', $m['home'] ) ); ?>
-								<?php if ( 'upload' === $m['origin'] ) : ?>
-									<span class="kb-tag">subido</span>
+						<li class="<?php echo esc_attr( $class ); ?>" data-id="<?php echo esc_attr( $job->id ); ?>">
+							<div class="kb-item__icon" aria-hidden="true"><span class="dashicons <?php echo esc_attr( $icon ); ?>"></span></div>
+							<div class="kb-item__info">
+								<p class="kb-item__date">
+									<?php echo esc_html( wp_date( 'j \d\e F Y · H:i', $m['created'] ) ); ?>
+									<?php if ( $job->id === $new_id ) : ?><span class="kb-tag kb-tag--ok">Nuevo</span><?php endif; ?>
+									<?php if ( 'upload' === $m['origin'] ) : ?><span class="kb-tag">Subido</span><?php endif; ?>
+								</p>
+								<p class="kb-item__meta">
+									<?php echo esc_html( $host ); ?>
+									<?php if ( 'done' === $m['status'] ) : ?> · <?php echo esc_html( size_format( $m['size'], 1 ) ); ?><?php endif; ?>
+									<?php if ( ! empty( $m['wp'] ) ) : ?> · WordPress <?php echo esc_html( $m['wp'] ); ?><?php endif; ?>
+								</p>
+								<?php if ( 'done' === $m['status'] ) : ?>
+									<p class="kb-item__key">
+										<?php if ( $m['key'] ) : ?>
+											Clave del instalador <code><?php echo esc_html( $m['key'] ); ?></code>
+											<button type="button" class="kb-link kb-copy" data-copy="<?php echo esc_attr( $m['key'] ); ?>">Copiar</button>
+										<?php else : ?>
+											<span class="kb-muted">Clave del instalador: la del sitio de origen.</span>
+										<?php endif; ?>
+									</p>
+									<?php if ( ! empty( $m['log'] ) ) : ?>
+										<details class="kb-item__notes">
+											<summary><?php echo esc_html( sprintf( 1 === count( $m['log'] ) ? '%d aviso' : '%d avisos', count( $m['log'] ) ) ); ?></summary>
+											<ul class="kb-log"><?php foreach ( $m['log'] as $line ) : ?><li><?php echo esc_html( $line ); ?></li><?php endforeach; ?></ul>
+										</details>
+									<?php endif; ?>
+								<?php elseif ( 'error' === $m['status'] ) : ?>
+									<p class="kb-error">No se completó: <?php echo esc_html( $m['message'] ); ?></p>
+								<?php else : ?>
+									<p class="kb-muted">Sin terminar: se interrumpió o sigue en curso.</p>
 								<?php endif; ?>
-								<?php if ( ! empty( $m['wp'] ) ) : ?>
-									<br><span class="kb-muted">WordPress <?php echo esc_html( $m['wp'] ); ?></span>
+							</div>
+							<div class="kb-item__actions">
+								<?php if ( 'done' === $m['status'] ) : ?>
+									<a class="kb-btn kb-btn--primary" href="<?php echo esc_url( add_query_arg( 'what', 'zip', $link ) ); ?>"><span class="dashicons dashicons-download" aria-hidden="true"></span> Descargar</a>
+									<a class="kb-btn" href="<?php echo esc_url( add_query_arg( 'what', 'installer', $link ) ); ?>" title="kombi-installer.php: súbelo junto al respaldo para instalarlo en otro servidor">Instalador</a>
+								<?php elseif ( 'running' === $m['status'] ) : ?>
+									<button type="button" class="kb-btn kb-btn--primary kb-resume">Continuar</button>
 								<?php endif; ?>
-							</td>
-							<?php if ( 'done' === $m['status'] ) : ?>
-								<td><?php echo esc_html( size_format( $m['size'], 1 ) ); ?></td>
-								<td>
-									<?php if ( $m['key'] ) : ?>
-										<code class="kb-key"><?php echo esc_html( $m['key'] ); ?></code>
-										<button type="button" class="button-link kb-copy" data-copy="<?php echo esc_attr( $m['key'] ); ?>">Copiar</button>
-									<?php else : ?>
-										<span class="kb-muted">La del sitio de origen</span>
-									<?php endif; ?>
-								</td>
-								<td class="kb-actions">
-									<a class="button button-small" href="<?php echo esc_url( add_query_arg( 'what', 'zip', $link ) ); ?>">Descargar respaldo</a>
-									<a class="button button-small" href="<?php echo esc_url( add_query_arg( 'what', 'installer', $link ) ); ?>">Descargar instalador</a>
-									<button type="button" class="button button-small kb-restore">Restaurar aquí</button>
-									<button type="button" class="button-link kb-delete">Eliminar</button>
-								</td>
-							<?php else : ?>
-								<td colspan="2">
-									<?php if ( 'error' === $m['status'] ) : ?>
-										<span class="kb-error">Error: <?php echo esc_html( $m['message'] ); ?></span>
-									<?php else : ?>
-										<span class="kb-muted">Sin terminar (se interrumpió o sigue en curso)</span>
-									<?php endif; ?>
-								</td>
-								<td class="kb-actions">
-									<?php if ( 'running' === $m['status'] ) : ?>
-										<button type="button" class="button button-small kb-resume">Continuar</button>
-									<?php endif; ?>
-									<button type="button" class="button-link kb-delete">Eliminar</button>
-								</td>
-							<?php endif; ?>
-						</tr>
-						<?php if ( 'done' === $m['status'] && ! empty( $m['log'] ) ) : ?>
-							<tr class="kb-notes"><td colspan="5"><details><summary><?php echo esc_html( sprintf( '%d avisos', count( $m['log'] ) ) ); ?></summary><ul class="kb-log"><?php foreach ( $m['log'] as $line ) : ?><li><?php echo esc_html( $line ); ?></li><?php endforeach; ?></ul></details></td></tr>
-						<?php endif; ?>
+								<details class="kb-menu">
+									<summary class="kb-btn kb-btn--icon" aria-label="Más acciones" title="Más acciones"><span class="dashicons dashicons-ellipsis" aria-hidden="true"></span></summary>
+									<div class="kb-menu__panel">
+										<?php if ( 'done' === $m['status'] ) : ?>
+											<button type="button" class="kb-restore"><span class="dashicons dashicons-image-rotate" aria-hidden="true"></span> Restaurar en este sitio</button>
+										<?php endif; ?>
+										<button type="button" class="kb-delete"><span class="dashicons dashicons-trash" aria-hidden="true"></span> Eliminar</button>
+									</div>
+								</details>
+							</div>
+						</li>
 					<?php endforeach; ?>
-					</tbody>
-				</table>
-			<?php endif; ?>
+					</ul>
+				</div>
 
-			<div class="kb-cards">
-				<section class="kb-card">
-					<h2>Llevar el sitio a otro servidor</h2>
-					<ol>
-						<li>Descarga el <strong>respaldo</strong> y el <strong>instalador</strong> (<code>kombi-installer.php</code>).</li>
-						<li>Súbelos a la carpeta vacía donde irá el sitio (por ejemplo <code>public_html</code>).</li>
-						<li>Crea una base de datos vacía en el hosting.</li>
-						<li>Abre <code>https://tu-dominio/kombi-installer.php</code>, escribe la clave del respaldo y los datos de la base de datos.</li>
-						<li>El instalador extrae todo, importa la base, cambia la URL antigua por la nueva y se borra solo al terminar.</li>
-					</ol>
-				</section>
-				<section class="kb-card">
-					<h2>Excluir del respaldo</h2>
-					<p class="kb-muted">Una ruta por línea, relativa a la carpeta de WordPress. Siempre se omiten <code>.git</code>, <code>node_modules</code> y los propios respaldos.</p>
-					<textarea id="kb-excludes" rows="8" class="large-text code"><?php echo esc_textarea( $excludes ); ?></textarea>
-					<p><button type="button" class="button" id="kb-save-excludes">Guardar</button> <span id="kb-excludes-msg" class="kb-muted"></span></p>
-				</section>
+				<aside class="kb-side">
+					<section class="kb-panel">
+						<h2>Llevar el sitio a otro servidor</h2>
+						<ol class="kb-steps">
+							<li><strong>Descarga</strong> el respaldo y el instalador.</li>
+							<li><strong>Súbelos</strong> a la carpeta vacía del nuevo hosting y crea una base de datos.</li>
+							<li><strong>Abre</strong> <code>tu-dominio/kombi-installer.php</code> y escribe la clave. El resto es automático.</li>
+						</ol>
+					</section>
+
+					<section class="kb-panel">
+						<h2>Restaurar un respaldo de otro sitio</h2>
+						<p class="kb-muted">Por ejemplo, la versión nueva que preparaste en local. Al subirlo aparece en la lista: ahí eliges <em>Restaurar en este sitio</em>.</p>
+						<label class="kb-drop" id="kb-drop">
+							<input type="file" id="kb-file" accept=".zip,application/zip">
+							<span class="dashicons dashicons-upload" aria-hidden="true"></span>
+							<span><strong>Arrastra el .zip aquí</strong><br><span class="kb-muted">o haz clic para elegirlo</span></span>
+						</label>
+					</section>
+
+					<details class="kb-panel kb-advanced">
+						<summary>Opciones avanzadas</summary>
+						<label for="kb-excludes" class="kb-label">Carpetas y archivos que no se respaldan</label>
+						<p class="kb-muted">Una ruta por línea, relativa a la carpeta de WordPress. Siempre se omiten <code>.git</code>, <code>node_modules</code> y los propios respaldos.</p>
+						<textarea id="kb-excludes" rows="8" class="large-text code"><?php echo esc_textarea( implode( "\n", Kombi_Backup_Job::excludes() ) ); ?></textarea>
+						<p><button type="button" class="kb-btn" id="kb-save-excludes">Guardar</button> <span id="kb-excludes-msg" class="kb-muted" role="status"></span></p>
+					</details>
+
+					<p class="kb-foot">Kombi Backup <?php echo esc_html( KOMBI_BACKUP_VERSION ); ?> · <a href="https://kombi.cl/ayuda/" target="_blank" rel="noopener">Ayuda de Kombi</a></p>
+				</aside>
 			</div>
 
-			<dialog id="kb-restore-dialog" class="kb-dialog">
+			<dialog id="kb-restore-dialog" class="kb-dialog" aria-labelledby="kb-restore-title">
 				<form method="dialog">
-					<h2>¿Restaurar este respaldo aquí?</h2>
-					<p>Se reemplazarán <strong>todos los archivos y la base de datos</strong> de <code><?php echo esc_html( home_url() ); ?></code> por los del respaldo. Se conservan <code>wp-config.php</code>, <code>.htaccess</code> y la URL de este sitio.</p>
-					<p>Mientras dura, el sitio muestra la página de mantenimiento. Al terminar tendrás que iniciar sesión con un usuario del respaldo.</p>
-					<p><label><input type="checkbox" id="kb-safety" checked> Crear antes un respaldo de seguridad del sitio actual (recomendado)</label></p>
+					<h2 id="kb-restore-title"><span class="dashicons dashicons-warning" aria-hidden="true"></span> ¿Restaurar este respaldo?</h2>
+					<p>Todo el contenido de <strong><?php echo esc_html( preg_replace( '#^https?://#', '', home_url() ) ); ?></strong> (archivos y base de datos) se reemplazará por el del respaldo.</p>
+					<ul class="kb-dialog__list">
+						<li>Se mantienen la dirección del sitio y la configuración del servidor.</li>
+						<li>Mientras dura, los visitantes ven una página de mantenimiento.</li>
+						<li>Al terminar, inicia sesión con un usuario del respaldo.</li>
+					</ul>
+					<label class="kb-check"><input type="checkbox" id="kb-safety" checked> Crear antes un respaldo del sitio actual (recomendado)</label>
 					<div class="kb-dialog__actions">
-						<button value="cancel" class="button">Cancelar</button>
-						<button value="ok" class="button button-primary kb-danger">Sí, restaurar</button>
+						<button value="cancel" class="kb-btn">Cancelar</button>
+						<button value="ok" class="kb-btn kb-btn--danger">Sí, restaurar</button>
 					</div>
 				</form>
 			</dialog>
 		</div>
 		<?php
+	}
+
+	/** Logo de Kombi en línea (toma el color del texto). */
+	private static function logo() {
+		return (string) file_get_contents( KOMBI_BACKUP_DIR . 'assets/kombi-logo.svg' );
 	}
 
 	/* ---------------------------------------------------------------------
