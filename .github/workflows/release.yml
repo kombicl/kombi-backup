@@ -8,7 +8,8 @@ name: Release
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', '.gitignore']
+    # Documentación, plantillas de GitHub y licencia no publican una versión nueva.
+    paths-ignore: ['**.md', '.gitignore', 'LICENSE', '.github/**']
   workflow_dispatch:
 
 permissions:

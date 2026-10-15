@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Reportar una vulnerabilidad de seguridad
+    url: https://github.com/kombicl/kombi-backup/security/advisories/new
+    about: Repórtala en privado, nunca en un issue público.
+  - name: Soporte de Kombi
+    url: https://kombi.cl/ayuda/
+    about: Ayuda para clientes de Kombi Consultoría TI.
