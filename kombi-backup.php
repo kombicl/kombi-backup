@@ -10,6 +10,7 @@
  * Author URI:        https://kombi.cl
  * License:           GPL-2.0-or-later
  * Text Domain:       kombi-backup
+ * Update URI:        https://github.com/kombicl/kombi-backup
  *
  * @package Kombi_Backup
  */
@@ -25,6 +26,9 @@ require KOMBI_BACKUP_DIR . 'includes/class-zip-writer.php';
 require KOMBI_BACKUP_DIR . 'includes/class-db-dumper.php';
 require KOMBI_BACKUP_DIR . 'includes/class-job.php';
 require KOMBI_BACKUP_DIR . 'includes/class-restore.php';
+require KOMBI_BACKUP_DIR . 'includes/class-updater.php';
+
+Kombi_Backup_Updater::init();
 
 if ( is_admin() ) {
 	require KOMBI_BACKUP_DIR . 'includes/class-admin.php';

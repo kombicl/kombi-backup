@@ -1,0 +1,86 @@
+# Cada push a main: revisa la sintaxis y, si pasa, publica un release.
+# Los sitios con Kombi Backup lo detectan (info.json) y se actualizan solos.
+#
+# Versión = MAYOR.MENOR de la cabecera de kombi-backup.php + número de ejecución
+# (0.1.12, 0.1.13…). Para saltar a 0.2.x, cambia "Version:" en kombi-backup.php.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', '.gitignore']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Sintaxis (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['7.4', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: none
+      - name: PHP
+        run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
+      - name: JavaScript
+        run: node --check assets/admin.js
+
+  release:
+    name: Publicar release
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Versión
+        run: |
+          base=$(grep -m1 -oP '^\s*\*\s*Version:\s*\K[0-9]+\.[0-9]+' kombi-backup.php)
+          echo "VERSION=${base}.${{ github.run_number }}" >> "$GITHUB_ENV"
+
+      - name: Armar kombi-backup.zip
+        run: |
+          mkdir -p build/kombi-backup
+          git archive HEAD | tar -x -C build/kombi-backup
+          cd build/kombi-backup
+          rm -rf .github .gitignore
+          sed -i -E "s/^( \* Version:\s+).*/\1${VERSION}/" kombi-backup.php
+          sed -i -E "s/define\( 'KOMBI_BACKUP_VERSION', '[^']*' \)/define( 'KOMBI_BACKUP_VERSION', '${VERSION}' )/" kombi-backup.php
+          sed -i -E "s/define\( 'KBI_VERSION', '[^']*' \)/define( 'KBI_VERSION', '${VERSION}' )/" installer/kombi-installer.php
+          grep -q "Version:.*${VERSION}" kombi-backup.php
+          grep -q "'KOMBI_BACKUP_VERSION', '${VERSION}'" kombi-backup.php
+          cd .. && zip -qr kombi-backup.zip kombi-backup
+
+      - name: Notas (commits desde el release anterior)
+        run: |
+          prev=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$prev" ]; then range="$prev..HEAD"; else range="HEAD"; fi
+          git log --no-merges --format='- %s' $range > notes.md
+
+      - name: info.json
+        run: |
+          jq -n \
+            --arg v "$VERSION" \
+            --arg pkg "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/kombi-backup.zip" \
+            --arg date "$(date -u +%F)" \
+            --rawfile log notes.md \
+            '{version: $v, package: $pkg, requires: "6.0", requires_php: "7.4", date: $date, changelog: $log}' > build/info.json
+
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" build/kombi-backup.zip build/info.json \
+            --title "Kombi Backup ${VERSION}" --notes-file notes.md --target "$GITHUB_SHA"
