@@ -218,7 +218,8 @@ class Kombi_Backup_Admin {
 					<p>Todo el contenido de <strong><?php echo esc_html( preg_replace( '#^https?://#', '', home_url() ) ); ?></strong> (archivos y base de datos) se reemplazará por el del respaldo.</p>
 					<ul class="kb-dialog__list">
 						<li>Se mantienen la dirección del sitio y la configuración del servidor.</li>
-						<li>Mientras dura, los visitantes ven una página de mantenimiento.</li>
+						<li>Los plugins, temas y archivos que no estén en el respaldo se eliminan.</li>
+						<li>Primero se verifica que el respaldo esté completo; luego, mientras dura, los visitantes ven una página de mantenimiento.</li>
 						<li>Al terminar, inicia sesión con un usuario del respaldo.</li>
 					</ul>
 					<label class="kb-check"><input type="checkbox" id="kb-safety" checked> Crear antes un respaldo del sitio actual (recomendado)</label>
@@ -258,8 +259,11 @@ class Kombi_Backup_Admin {
 	public static function ajax_start() {
 		self::guard();
 		try {
-			$job = Kombi_Backup_Job::create();
-			wp_send_json_success( $job->run() );
+			$progress = Kombi_Backup_Job::create()->run();
+			if ( 'error' === $progress['status'] ) {
+				wp_send_json_error( array( 'message' => $progress['message'] ) );
+			}
+			wp_send_json_success( $progress );
 		} catch ( Throwable $e ) {
 			wp_send_json_error( array( 'message' => $e->getMessage() ) );
 		}
@@ -305,19 +309,31 @@ class Kombi_Backup_Admin {
 		if ( strlen( $upload ) < 16 || $index < 0 || $index >= $total || empty( $_FILES['chunk']['tmp_name'] ) || UPLOAD_ERR_OK !== $_FILES['chunk']['error'] ) {
 			wp_send_json_error( array( 'message' => 'Trozo de subida inválido.' ), 400 );
 		}
+		$size  = isset( $_POST['size'] ) ? (int) $_POST['size'] : 0;
+		$chunk = isset( $_POST['chunk_size'] ) ? (int) $_POST['chunk_size'] : 0;
+		if ( $size <= 0 || $chunk < 65536 || (int) ceil( $size / $chunk ) !== $total ) {
+			wp_send_json_error( array( 'message' => 'Datos de subida inválidos.' ), 400 );
+		}
 		$part = kombi_backup_storage_dir() . '/upload-' . $upload . '.part';
 		if ( 0 === $index ) {
 			@unlink( $part );
 		} elseif ( ! is_file( $part ) ) {
 			wp_send_json_error( array( 'message' => 'La subida se perdió; vuelve a intentarlo.' ), 400 );
 		}
+		// Cada trozo va a su posición: si el navegador reintenta uno, se sobrescribe en vez de duplicarse.
 		$in  = fopen( $_FILES['chunk']['tmp_name'], 'rb' );
-		$out = fopen( $part, 'ab' );
+		$out = fopen( $part, 'c+b' );
+		fseek( $out, $index * $chunk );
 		stream_copy_to_stream( $in, $out );
 		fclose( $in );
 		fclose( $out );
 		if ( $index < $total - 1 ) {
 			wp_send_json_success( array( 'received' => $index ) );
+		}
+		clearstatcache( true, $part );
+		if ( filesize( $part ) !== $size ) {
+			@unlink( $part );
+			wp_send_json_error( array( 'message' => 'La subida quedó incompleta. Vuelve a intentarlo.' ) );
 		}
 		try {
 			$job = Kombi_Backup_Job::from_upload( $part );

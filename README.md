@@ -43,12 +43,24 @@ wp-admin/ wp-includes/ wp-content/ …
 - Si `wp-config.php` está un nivel arriba de la carpeta de WordPress, se incluye en el respaldo.
 - No copia el `.user.ini` ni el `php.ini` del servidor de origen.
 
+## Restaurar: qué se borra
+
+Antes de tocar nada, el instalador verifica el CRC de todo el respaldo. Un `.zip` cortado o dañado se rechaza sin activar el mantenimiento ni escribir archivos.
+
+Luego, en `wp-admin`, `wp-includes` y `wp-content` borra lo que no viene en el respaldo: plugins eliminados, archivos inyectados (por ejemplo, un `.php` en `uploads`). Nunca toca:
+
+- lo que esté fuera de esas tres carpetas (en `public_html` puede haber otros sitios);
+- lo excluido del respaldo (cachés, respaldos de otros plugins);
+- `wp-content/kombi-backups`;
+- los enlaces simbólicos.
+
 ## Limitaciones (v0.1)
 
 - Multisitio: no soportado.
-- Restaurar sobrescribe los archivos del respaldo, pero no borra los que existen solo en el destino. Por ejemplo, un plugin eliminado queda en disco, aunque inactivo, porque la lista de plugins activos viene de la base de datos.
-- Solo respalda lo que está bajo `ABSPATH` (no un `WP_CONTENT_DIR` movido fuera).
+- `wp-content` fuera de la carpeta de WordPress (Bedrock y similares): se rechaza con un aviso.
+- Un archivo muy grande (varios GB) se procesa en un solo paso: en un hosting con un límite de tiempo de PHP corto podría no alcanzar.
 - No cambia el prefijo de tablas al instalar.
+- Durante una instalación nueva, el `.zip` queda en la carpeta pública hasta que termina. Su nombre lleva un sufijo aleatorio y el instalador no lo muestra antes de la clave, pero conviene no dejarlo ahí más de lo necesario.
 
 ## Desarrollo
 

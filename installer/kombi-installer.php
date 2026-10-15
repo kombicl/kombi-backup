@@ -47,6 +47,9 @@ if ( isset( $_GET['restore'] ) ) {
 		session_regenerate_id( true );
 		$_SESSION['kbi_auth']    = 'restore';
 		$_SESSION['kbi_archive'] = $cfg['archive'];
+		// Un solo uso: el enlace no sirve de nuevo aunque quede en historial o logs.
+		$cfg['token_hash'] = 'usado';
+		kbi_write( KBI_RESTORE_FILE, "<?php exit; ?>\n" . json_encode( $cfg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) );
 	}
 	header( 'Location: ' . basename( __FILE__ ) );
 	exit;
@@ -104,7 +107,8 @@ function kbi_info() {
 		'checks' => kbi_checks(),
 	);
 	if ( ! $out['auth'] ) {
-		$out['archives'] = array_map( 'basename', kbi_find_archives() );
+		// Solo cuántos: el nombre del .zip permitiría descargarlo sin la clave.
+		$out['archives']        = count( kbi_find_archives() );
 		$out['restore_pending'] = (bool) kbi_restore_cfg();
 		return $out;
 	}
@@ -123,7 +127,7 @@ function kbi_info() {
 		$cfg        = kbi_restore_cfg();
 		$db         = kbi_parse_wpconfig( KBI_DIR . '/wp-config.php' );
 		$out['url'] = $cfg ? $cfg['home'] : kbi_detect_url();
-		$out['db']  = array( 'host' => $db['host'], 'name' => $db['name'], 'user' => $db['user'], 'prefix' => $manifest['table_prefix'], 'from_config' => (bool) $db['name'] );
+		$out['db']  = array( 'host' => $db['host'], 'name' => $db['name'], 'user' => $db['user'], 'prefix' => $manifest['table_prefix'], 'from_config' => $db['complete'] );
 	} else {
 		$out['url'] = kbi_detect_url();
 		$out['db']  = array( 'host' => 'localhost', 'name' => '', 'user' => '', 'prefix' => $manifest['table_prefix'], 'from_config' => false );
@@ -139,21 +143,21 @@ function kbi_login() {
 		return array();
 	}
 	$archives = kbi_find_archives();
-	$name     = isset( $_POST['archive'] ) ? basename( (string) $_POST['archive'] ) : '';
-	$archive  = null;
+	if ( ! $archives ) {
+		throw new KBI_Error( 'No encontré el archivo de respaldo (.zip) en esta carpeta.' );
+	}
+	// La clave elige el respaldo: así no hay que mostrar nombres de archivo antes de entrar.
+	$key     = strtolower( trim( (string) ( isset( $_POST['key'] ) ? $_POST['key'] : '' ) ) );
+	$archive = null;
 	foreach ( $archives as $a ) {
-		if ( basename( $a ) === $name || ( '' === $name && 1 === count( $archives ) ) ) {
+		if ( '' !== $key && password_verify( $key, kbi_manifest( $a )['key_hash'] ) ) {
 			$archive = $a;
+			break;
 		}
 	}
 	if ( ! $archive ) {
-		throw new KBI_Error( 'No encontré el archivo de respaldo (.zip) en esta carpeta.' );
-	}
-	$manifest = kbi_manifest( $archive );
-	$key      = strtolower( trim( (string) ( isset( $_POST['key'] ) ? $_POST['key'] : '' ) ) );
-	if ( '' === $key || ! password_verify( $key, $manifest['key_hash'] ) ) {
 		sleep( 2 );
-		throw new KBI_Error( 'La clave no corresponde a este respaldo.' );
+		throw new KBI_Error( 'La clave no corresponde a ningún respaldo de esta carpeta.' );
 	}
 	session_regenerate_id( true );
 	$_SESSION['kbi_auth']    = 'fresh';
@@ -180,9 +184,10 @@ function kbi_start() {
 		$db   = kbi_parse_wpconfig( KBI_DIR . '/wp-config.php' );
 		$home = $cfg['home'];
 		$site = $cfg['siteurl'];
-		if ( ! $db['name'] ) {
-			$db = kbi_db_input();
+		if ( ! $db['complete'] ) {
+			$db = kbi_db_input(); // wp-config usa getenv() u otra lógica: datos del formulario.
 		}
+		unset( $db['complete'] );
 	} else {
 		$db   = kbi_db_input();
 		$home = rtrim( trim( (string) $_POST['url'] ), '/' );
@@ -198,7 +203,7 @@ function kbi_start() {
 	kbi_test_db( $db );
 
 	kbi_ensure_tmp();
-	kbi_maintenance( true );
+	// El modo mantenimiento se activa recién después de verificar el respaldo.
 	$state = array(
 		'mode'           => $mode,
 		'archive'        => $archive,
@@ -207,9 +212,11 @@ function kbi_start() {
 		'home'           => rtrim( $home, '/' ),
 		'siteurl'        => rtrim( $site, '/' ),
 		'delete_archive' => 'fresh' === $mode && ! empty( $_POST['delete_archive'] ),
-		'stage'          => 'extract',
+		'stage'          => 'verify',
+		'verified'       => 0,
 		'offset'         => 0,
 		'files'          => 0,
+		'clean'          => null,
 		'import'         => null,
 		'replace'        => null,
 		'log'            => array(),
@@ -232,8 +239,12 @@ function kbi_step() {
 	try {
 		while ( microtime( true ) < $deadline && 'done' !== $state['stage'] ) {
 			$stage = $state['stage'];
-			if ( 'extract' === $stage ) {
+			if ( 'verify' === $stage ) {
+				kbi_step_verify( $state, $deadline );
+			} elseif ( 'extract' === $stage ) {
 				kbi_step_extract( $state, $deadline );
+			} elseif ( 'clean' === $stage ) {
+				kbi_step_clean( $state, $deadline );
 			} elseif ( 'import' === $stage ) {
 				kbi_step_import( $state, $deadline );
 			} elseif ( 'replace' === $stage ) {
@@ -260,14 +271,21 @@ function kbi_step() {
 }
 
 function kbi_progress( array $s ) {
-	$weights = array( 'extract' => array( 0, 45 ), 'import' => array( 45, 35 ), 'replace' => array( 80, 17 ), 'config' => array( 97, 3 ), 'done' => array( 100, 0 ) );
+	$weights = array( 'verify' => array( 0, 15 ), 'extract' => array( 15, 35 ), 'clean' => array( 50, 3 ), 'import' => array( 53, 30 ), 'replace' => array( 83, 14 ), 'config' => array( 97, 3 ), 'done' => array( 100, 0 ) );
 	$frac    = 0;
 	$label   = '';
+	$size    = max( 1, (int) @filesize( $s['archive'] ) );
 	switch ( $s['stage'] ) {
+		case 'verify':
+			$frac  = $s['verified'] / $size;
+			$label = 'Verificando que el respaldo esté completo';
+			break;
 		case 'extract':
-			$size  = max( 1, (int) @filesize( $s['archive'] ) );
 			$frac  = $s['offset'] / $size;
 			$label = sprintf( 'Extrayendo archivos: %s', number_format( $s['files'], 0, ',', '.' ) );
+			break;
+		case 'clean':
+			$label = 'Quitando archivos que no están en el respaldo';
 			break;
 		case 'import':
 			$i     = $s['import'];
@@ -311,7 +329,7 @@ function kbi_step_extract( array &$s, $deadline ) {
 	while ( microtime( true ) < $deadline ) {
 		$e = kbi_zip_entry( $fh, $s['offset'] );
 		if ( ! $e ) {
-			$s['stage'] = 'import';
+			$s['stage'] = 'restore' === $s['mode'] ? 'clean' : 'import';
 			break;
 		}
 		$target = kbi_target( $s, $e['name'] );
@@ -411,12 +429,21 @@ function kbi_extract_entry( $fh, array $e, $target ) {
 	if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0755, true ) && ! is_dir( $dir ) ) {
 		throw new KBI_Error( 'No se pudo crear la carpeta de ' . $e['name'] );
 	}
-	if ( ! in_array( $e['method'], array( 0, 8 ), true ) ) {
-		throw new KBI_Error( 'Método de compresión no soportado en ' . $e['name'] );
-	}
 	$out = @fopen( $target, 'wb' );
 	if ( ! $out ) {
 		throw new KBI_Error( 'No se pudo escribir ' . $e['name'] . ' (revisa permisos).' );
+	}
+	try {
+		kbi_stream_entry( $fh, $e, $out );
+	} finally {
+		fclose( $out );
+	}
+}
+
+/** Descomprime una entrada (a $out, o a ninguna parte para solo verificar) y comprueba su CRC. */
+function kbi_stream_entry( $fh, array $e, $out = null ) {
+	if ( ! in_array( $e['method'], array( 0, 8 ), true ) ) {
+		throw new KBI_Error( 'Método de compresión no soportado en ' . $e['name'] );
 	}
 	fseek( $fh, $e['data'] );
 	$left = $e['comp'];
@@ -425,24 +452,117 @@ function kbi_extract_entry( $fh, array $e, $target ) {
 	while ( $left > 0 ) {
 		$buf = fread( $fh, (int) min( KBI_CHUNK, $left ) );
 		if ( false === $buf || '' === $buf ) {
-			fclose( $out );
-			throw new KBI_Error( 'El respaldo está incompleto (se cortó la subida?): ' . $e['name'] );
+			throw new KBI_Error( 'El respaldo está incompleto (¿se cortó la subida?): ' . $e['name'] );
 		}
 		$left -= strlen( $buf );
 		if ( $z ) {
-			$buf = inflate_add( $z, $buf, $left > 0 ? ZLIB_SYNC_FLUSH : ZLIB_FINISH );
+			$buf = @inflate_add( $z, $buf, $left > 0 ? ZLIB_SYNC_FLUSH : ZLIB_FINISH );
 			if ( false === $buf ) {
-				fclose( $out );
-				throw new KBI_Error( 'Datos dañados en ' . $e['name'] );
+				throw new KBI_Error( 'El respaldo está dañado en ' . $e['name'] . '. Vuelve a subirlo.' );
 			}
 		}
 		hash_update( $crc, $buf );
-		fwrite( $out, $buf );
+		if ( $out ) {
+			fwrite( $out, $buf );
+		}
 	}
-	fclose( $out );
 	if ( hexdec( hash_final( $crc ) ) !== $e['crc'] ) {
-		throw new KBI_Error( 'El archivo ' . $e['name'] . ' está dañado (CRC). Vuelve a subir el respaldo.' );
+		throw new KBI_Error( 'El archivo ' . $e['name'] . ' está dañado dentro del respaldo (CRC). Vuelve a subirlo.' );
 	}
+}
+
+/**
+ * Paso 0: lee todo el respaldo y comprueba cada CRC sin escribir nada.
+ * Un .zip incompleto o dañado se detecta antes de tocar el sitio.
+ */
+function kbi_step_verify( array &$s, $deadline ) {
+	$fh = @fopen( $s['archive'], 'rb' );
+	if ( ! $fh ) {
+		throw new KBI_Error( 'No se pudo abrir el respaldo.' );
+	}
+	$size = filesize( $s['archive'] );
+	while ( microtime( true ) < $deadline ) {
+		$e = kbi_zip_entry( $fh, $s['verified'] );
+		if ( ! $e ) {
+			// Tras la última entrada debe venir el directorio central (fin del .zip).
+			fseek( $fh, $s['verified'] );
+			if ( "PK\x01\x02" !== fread( $fh, 4 ) && $s['verified'] < $size ) {
+				fclose( $fh );
+				throw new KBI_Error( 'El respaldo está dañado o incompleto. Vuelve a subirlo.' );
+			}
+			$s['stage'] = 'extract';
+			kbi_maintenance( true );
+			break;
+		}
+		if ( $e['next'] > $size ) {
+			fclose( $fh );
+			throw new KBI_Error( 'El respaldo está incompleto (¿se cortó la subida?). Vuelve a subirlo.' );
+		}
+		if ( '/' !== substr( $e['name'], -1 ) ) {
+			kbi_stream_entry( $fh, $e );
+		}
+		$s['verified'] = $e['next'];
+	}
+	fclose( $fh );
+}
+
+/**
+ * Restaurar: quita de wp-admin, wp-includes y wp-content lo que no viene en el
+ * respaldo (plugins eliminados, archivos inyectados). Nunca toca nada fuera de
+ * esas carpetas (public_html puede tener otros sitios) ni lo que el respaldo
+ * excluyó a propósito (cachés, respaldos de otros plugins).
+ */
+function kbi_step_clean( array &$s, $deadline ) {
+	@set_time_limit( 300 );
+	$keep = array();
+	$fh   = fopen( $s['archive'], 'rb' );
+	for ( $o = 0; ( $e = kbi_zip_entry( $fh, $o ) ); $o = $e['next'] ) {
+		$keep[ rtrim( str_replace( '\\', '/', $e['name'] ), '/' ) ] = true;
+	}
+	fclose( $fh );
+
+	$m       = $s['manifest'];
+	$protect = array_merge(
+		isset( $m['excludes'] ) ? $m['excludes'] : array( 'wp-content/cache', 'wp-content/upgrade', 'wp-content/backups', 'wp-content/backup-db', 'wp-content/updraft', 'wp-content/ai1wm-backups', 'wp-content/litespeed', 'wp-content/et-cache', 'wp-content/plugins/akeebabackupwp/app/backups' ),
+		array( 'wp-content/kombi-backups' )
+	);
+	$names   = array( '.git', '.svn', 'node_modules' );
+	$removed = array();
+	$stack   = array( 'wp-admin', 'wp-includes', 'wp-content' );
+	while ( $stack ) {
+		$dir   = array_pop( $stack );
+		$items = @scandir( KBI_DIR . '/' . $dir );
+		foreach ( $items ? $items : array() as $name ) {
+			if ( '.' === $name || '..' === $name || in_array( $name, $names, true ) ) {
+				continue;
+			}
+			$rel = "$dir/$name";
+			$abs = KBI_DIR . '/' . $rel;
+			if ( in_array( $rel, $protect, true ) || is_link( $abs ) ) {
+				continue;
+			}
+			if ( is_dir( $abs ) ) {
+				$holds_protected = false;
+				foreach ( $protect as $p ) {
+					if ( 0 === strpos( $p, $rel . '/' ) ) {
+						$holds_protected = true;
+					}
+				}
+				if ( isset( $keep[ $rel ] ) || $holds_protected ) {
+					$stack[] = $rel;
+				} else {
+					kbi_rrmdir( $abs );
+					$removed[] = $rel . '/';
+				}
+			} elseif ( ! isset( $keep[ $rel ] ) && @unlink( $abs ) ) {
+				$removed[] = $rel;
+			}
+		}
+	}
+	if ( $removed ) {
+		kbi_log( $s, sprintf( 'Se quitaron %d archivos/carpetas que no están en el respaldo: %s%s', count( $removed ), implode( ', ', array_slice( $removed, 0, 8 ) ), count( $removed ) > 8 ? '…' : '' ) );
+	}
+	$s['stage'] = 'import';
 }
 
 /* -------------------------------------------------------------------------
@@ -468,7 +588,8 @@ function kbi_step_import( array &$s, $deadline ) {
 		}
 		$s['import'] = array( 'part' => 1, 'pos' => 0, 'total' => $total, 'done' => 0, 'base' => 0, 'queries' => 0, 'fix' => $fix );
 	}
-	$im = &$s['import'];
+	$im    = &$s['import'];
+	$saved = microtime( true );
 	while ( microtime( true ) < $deadline ) {
 		$file = kbi_sql_part( $im['part'] );
 		if ( ! is_file( $file ) ) {
@@ -499,6 +620,11 @@ function kbi_step_import( array &$s, $deadline ) {
 			}
 			$im['pos']  = ftell( $fh );
 			$im['done'] = $im['base'] + $im['pos'];
+			// Guardar seguido: si el servidor corta el paso, se repite lo mínimo.
+			if ( microtime( true ) - $saved > 2 ) {
+				kbi_save_state( $s );
+				$saved = microtime( true );
+			}
 		}
 		$eof = feof( $fh );
 		fclose( $fh );
@@ -848,7 +974,7 @@ function kbi_step_config( array &$s ) {
 			'WP_SITEURL'  => $s['siteurl'],
 		);
 		foreach ( $values as $const => $value ) {
-			$re = '/define\s*\(\s*([\'"])' . $const . '\1\s*,[^;]*?\)\s*;/';
+			$re = kbi_define_re( $const );
 			if ( preg_match( $re, $php ) ) {
 				// WP_HOME / WP_SITEURL pueden calcularse con lógica del servidor antiguo: se fijan al valor nuevo.
 				$php = preg_replace_callback(
@@ -973,15 +1099,38 @@ function kbi_db_connect( array $db, $select = true ) {
 
 /** Datos de conexión de un wp-config.php existente (defines con valores literales). */
 function kbi_parse_wpconfig( $file ) {
-	$out = array( 'host' => '', 'name' => '', 'user' => '', 'pass' => '' );
-	$php = is_file( $file ) ? (string) file_get_contents( $file ) : '';
-	$map = array( 'DB_HOST' => 'host', 'DB_NAME' => 'name', 'DB_USER' => 'user', 'DB_PASSWORD' => 'pass' );
+	$out   = array( 'host' => '', 'name' => '', 'user' => '', 'pass' => '' );
+	$php   = is_file( $file ) ? (string) file_get_contents( $file ) : '';
+	$map   = array( 'DB_HOST' => 'host', 'DB_NAME' => 'name', 'DB_USER' => 'user', 'DB_PASSWORD' => 'pass' );
+	$found = 0;
 	foreach ( $map as $const => $key ) {
-		if ( preg_match( '/define\s*\(\s*([\'"])' . $const . '\1\s*,\s*([\'"])((?:\\\\.|(?!\2).)*)\2\s*\)/s', $php, $m ) ) {
-			$out[ $key ] = stripcslashes( $m[3] );
+		if ( preg_match( kbi_define_re( $const ), $php, $m ) && preg_match( '/^\s*(\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\$]|\\\\.)*")\s*$/s', $m[2], $lit ) ) {
+			$out[ $key ] = kbi_php_string( $lit[1] );
+			++$found;
 		}
 	}
+	// Solo si los cuatro son valores literales se usan sin preguntar (getenv() y similares → formulario).
+	$out['complete'] = 4 === $found;
 	return $out;
+}
+
+/**
+ * define( 'CONST', valor ); — el valor puede ser cualquier expresión y sus
+ * strings pueden contener ; o ) (contraseñas generadas por el hosting).
+ * Grupo 2 = la expresión.
+ */
+function kbi_define_re( $const ) {
+	$str = '\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*"';
+	return '/define\s*\(\s*([\'"])' . preg_quote( $const, '/' ) . '\1\s*,((?:' . $str . '|[^;\'"])*?)\)\s*;/s';
+}
+
+/** Valor de un literal de string PHP ('…' o "…" sin variables). */
+function kbi_php_string( $lit ) {
+	$body = substr( $lit, 1, -1 );
+	if ( "'" === $lit[0] ) {
+		return preg_replace( '/\\\\([\\\\\'])/', '$1', $body );
+	}
+	return stripcslashes( $body );
 }
 
 function kbi_q( $name ) {
@@ -1111,7 +1260,8 @@ function kbi_rrmdir( $dir ) {
 	}
 	foreach ( (array) scandir( $dir ) as $f ) {
 		if ( '.' !== $f && '..' !== $f ) {
-			is_dir( "$dir/$f" ) ? kbi_rrmdir( "$dir/$f" ) : @unlink( "$dir/$f" );
+			// Un enlace simbólico se borra como enlace: nunca se sigue hacia su destino.
+			is_dir( "$dir/$f" ) && ! is_link( "$dir/$f" ) ? kbi_rrmdir( "$dir/$f" ) : @unlink( "$dir/$f" );
 		}
 	}
 	@rmdir( $dir );
@@ -1191,10 +1341,6 @@ a{color:var(--accent)}
 		<h2>Clave del respaldo</h2>
 		<p class="muted">Está en Herramientas → Kombi Backup del sitio de origen, junto al respaldo.</p>
 		<form id="f-login">
-			<div id="archive-wrap" hidden>
-				<label for="archive">Respaldo</label>
-				<select id="archive" name="archive"></select>
-			</div>
 			<label for="key">Clave</label>
 			<input type="text" id="key" name="key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="xxxx-xxxx-xxxx" required>
 			<div class="actions"><button type="submit">Continuar</button></div>
@@ -1244,7 +1390,9 @@ a{color:var(--accent)}
 	<section class="card" id="s-run" hidden>
 		<h2 id="run-title">Instalando…</h2>
 		<ul class="steps" id="steps">
+			<li data-stage="verify">Verificar el respaldo</li>
 			<li data-stage="extract">Extraer archivos</li>
+			<li data-stage="clean" data-mode="restore">Quitar archivos que ya no están</li>
 			<li data-stage="import">Importar base de datos</li>
 			<li data-stage="replace">Cambiar URLs y rutas</li>
 			<li data-stage="config">Ajustar configuración</li>
@@ -1298,11 +1446,7 @@ a{color:var(--accent)}
 			if (!r.auth) {
 				show('s-login');
 				if (r.restore_pending) { $('subtitle').textContent = 'Restauración: vuelve a abrir el enlace desde Herramientas → Kombi Backup.'; }
-				if (!r.archives.length) { $('f-login').hidden = true; $('no-archive').hidden = false; return; }
-				if (r.archives.length > 1) {
-					$('archive-wrap').hidden = false;
-					r.archives.forEach(function (a) { var o = document.createElement('option'); o.textContent = a; $('archive').appendChild(o); });
-				}
+				if (!r.archives) { $('f-login').hidden = true; $('no-archive').hidden = false; return; }
 				$('key').focus();
 				return;
 			}
@@ -1374,9 +1518,10 @@ a{color:var(--accent)}
 	});
 
 	function paint(p) {
-		var order = ['extract', 'import', 'replace', 'config', 'done'], at = order.indexOf(p.stage);
+		var order = ['verify', 'extract', 'clean', 'import', 'replace', 'config', 'done'], at = order.indexOf(p.stage);
 		document.querySelectorAll('#steps li').forEach(function (li) {
 			var i = order.indexOf(li.dataset.stage);
+			li.hidden = !!li.dataset.mode && li.dataset.mode !== p.mode;
 			li.className = i < at ? 'ok' : (i === at ? 'now' : '');
 		});
 		$('bar').value = p.percent;
@@ -1412,7 +1557,7 @@ a{color:var(--accent)}
 			$('retry-wrap').hidden = false;
 		});
 	}
-	$('b-retry').addEventListener('click', function () { api('info').then(function (r) { run(r.running || { stage: 'extract', percent: 0, label: '', log: [] }); }); });
+	$('b-retry').addEventListener('click', function () { api('info').then(function (r) { run(r.running || { stage: 'verify', percent: 0, label: '', log: [] }); }); });
 
 	load();
 }());

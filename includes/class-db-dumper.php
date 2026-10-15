@@ -92,6 +92,8 @@ class Kombi_Backup_Db_Dumper {
 				foreach ( $this->s['views'] as $view ) {
 					$row = mysqli_fetch_row( $this->query( 'SHOW CREATE VIEW ' . self::q( $view ) ) );
 					$sql = preg_replace( '/\sDEFINER=`[^`]*`@`[^`]*`/', '', $row[1] );
+				// MySQL escribe `base`.`tabla`: en el destino la base se llama distinto.
+				$sql = str_replace( self::q( DB_NAME ) . '.', '', $sql );
 					$this->line( 'DROP VIEW IF EXISTS ' . self::q( $view ) . ';' );
 					$this->line( self::one_line( $sql ) . ';' );
 				}
@@ -107,6 +109,10 @@ class Kombi_Backup_Db_Dumper {
 		$bin  = array();
 		$res  = $this->query( 'SHOW COLUMNS FROM ' . self::q( $name ) );
 		while ( $c = mysqli_fetch_assoc( $res ) ) {
+			// Columnas calculadas (VIRTUAL/STORED GENERATED): MySQL las rechaza en INSERT.
+			if ( false !== stripos( $c['Extra'], 'GENERATED' ) ) {
+				continue;
+			}
 			$cols[ $c['Field'] ] = $c['Type'];
 			$bin[]               = (bool) preg_match( '/blob|binary|bit/i', $c['Type'] );
 		}
@@ -116,7 +122,7 @@ class Kombi_Backup_Db_Dumper {
 			$pk[] = $k['Column_name'];
 		}
 		// Cursor por PK entera única (rápido); si no, LIMIT/OFFSET.
-		$use_pk = 1 === count( $pk ) && preg_match( '/int/i', $cols[ $pk[0] ] );
+		$use_pk = 1 === count( $pk ) && isset( $cols[ $pk[0] ] ) && preg_match( '/int/i', $cols[ $pk[0] ] );
 		return array(
 			'name'   => $name,
 			'cols'   => array_keys( $cols ),
@@ -137,7 +143,8 @@ class Kombi_Backup_Db_Dumper {
 	private function rows() {
 		$t   = &$this->s['table'];
 		$tq  = self::q( $t['name'] );
-		$sql = "SELECT * FROM $tq";
+		$cols = implode( ',', array_map( array( __CLASS__, 'q' ), $t['cols'] ) );
+		$sql  = "SELECT $cols FROM $tq";
 		if ( $t['pk'] ) {
 			$pk = self::q( $t['pk'] );
 			if ( null !== $t['cursor'] ) {
@@ -148,7 +155,7 @@ class Kombi_Backup_Db_Dumper {
 			$sql .= ' LIMIT ' . (int) $t['offset'] . ', ' . self::ROWS;
 		}
 
-		$head = "INSERT INTO $tq (" . implode( ',', array_map( array( __CLASS__, 'q' ), $t['cols'] ) ) . ') VALUES ';
+		$head = "INSERT INTO $tq ($cols) VALUES ";
 		$buf  = '';
 		$n    = 0;
 		$res  = mysqli_query( $this->dbh, $sql, MYSQLI_USE_RESULT ); // Sin búfer: no carga el bloque entero en memoria.

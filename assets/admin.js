@@ -70,6 +70,9 @@
 	/** Llama "step" hasta terminar; reintenta cortes de red/timeouts (el servidor retoma). */
 	function drive( p ) {
 		render( p );
+		if ( 'error' === p.status ) {
+			return Promise.reject( new Error( p.message || 'El respaldo falló.' ) );
+		}
 		if ( p.done ) {
 			return Promise.resolve( p );
 		}
@@ -183,6 +186,8 @@
 			fd.append( 'upload', id );
 			fd.append( 'index', i );
 			fd.append( 'total', total );
+			fd.append( 'size', file.size );
+			fd.append( 'chunk_size', cfg.chunk );
 			fd.append( 'chunk', file.slice( i * cfg.chunk, ( i + 1 ) * cfg.chunk ), 'chunk' );
 			return post( 'upload', fd ).then( function ( r ) {
 				fails = 0;

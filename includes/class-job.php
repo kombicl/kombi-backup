@@ -37,6 +37,9 @@ class Kombi_Backup_Job {
 		if ( ! function_exists( 'deflate_init' ) ) {
 			throw new RuntimeException( 'PHP no tiene zlib; no se puede comprimir.' );
 		}
+		if ( 0 !== strpos( trailingslashit( wp_normalize_path( WP_CONTENT_DIR ) ), self::root() ) ) {
+			throw new RuntimeException( 'wp-content está fuera de la carpeta de WordPress; esta versión no puede respaldar esa estructura.' );
+		}
 		$job       = new self( 'kb-' . wp_date( 'Ymd-His' ) . '-' . bin2hex( random_bytes( 5 ) ) );
 		$job->meta = array(
 			'id'       => $job->id,
@@ -101,6 +104,10 @@ class Kombi_Backup_Job {
 			@unlink( $file );
 			throw new RuntimeException( 'El archivo no es un respaldo de Kombi Backup.' );
 		}
+		if ( ! self::has_zip_end( $file ) ) {
+			@unlink( $file );
+			throw new RuntimeException( 'El respaldo está incompleto (le falta el final del .zip). Vuelve a subirlo.' );
+		}
 		$job = new self( 'kb-' . wp_date( 'Ymd-His' ) . '-' . bin2hex( random_bytes( 5 ) ) );
 		if ( ! @rename( $file, $job->zip_path() ) ) {
 			throw new RuntimeException( 'No se pudo guardar el archivo subido.' );
@@ -152,6 +159,21 @@ class Kombi_Backup_Job {
 		return is_array( $m ) && isset( $m['format'] ) ? $m : null;
 	}
 
+	/** ¿Termina con el registro de fin de ZIP? (detecta subidas cortadas). */
+	public static function has_zip_end( $file ) {
+		$size = (int) @filesize( $file );
+		$fh   = @fopen( $file, 'rb' );
+		if ( ! $fh || $size < 22 ) {
+			return false;
+		}
+		$len = min( $size, 65557 ); // 22 bytes + comentario máximo.
+		fseek( $fh, $size - $len );
+		$tail = fread( $fh, $len );
+		fclose( $fh );
+		$pos = strrpos( $tail, "PK\x05\x06" );
+		return false !== $pos && $pos + 22 <= strlen( $tail );
+	}
+
 	public function path( $suffix ) {
 		return kombi_backup_storage_dir() . '/' . $this->id . $suffix;
 	}
@@ -173,7 +195,8 @@ class Kombi_Backup_Job {
 	/** Nombre de descarga legible: backup-dominio-fecha.zip */
 	public function download_name() {
 		$host = wp_parse_url( $this->meta['home'], PHP_URL_HOST );
-		return sanitize_file_name( 'backup-' . ( $host ? $host : 'wordpress' ) . '-' . wp_date( 'Y-m-d-Hi', $this->meta['created'] ) . '.zip' );
+		// Sufijo aleatorio: mientras el .zip espera al instalador en public_html, su nombre no se puede adivinar.
+		return sanitize_file_name( 'backup-' . ( $host ? $host : 'wordpress' ) . '-' . wp_date( 'Y-m-d-Hi', $this->meta['created'] ) . '-' . substr( $this->id, -6 ) . '.zip' );
 	}
 
 	/* ---------------------------------------------------------------------
@@ -208,9 +231,10 @@ class Kombi_Backup_Job {
 			$this->cleanup_temp();
 		}
 		$this->save();
+		// El .lock no se borra aquí: si se borrara, otro paso podría bloquear un archivo nuevo
+		// mientras un tercero sigue con el viejo, y ambos escribirían el ZIP a la vez.
 		flock( $this->lock, LOCK_UN );
 		fclose( $this->lock );
-		@unlink( $this->path( '.lock' ) );
 		return $this->progress();
 	}
 
@@ -416,6 +440,8 @@ class Kombi_Backup_Job {
 			'files'        => $this->meta['files'],
 			'bytes'        => $this->meta['bytes'],
 			'key_hash'     => password_hash( $this->meta['key'], PASSWORD_DEFAULT ),
+			// Al restaurar, lo excluido no se borra del destino (cachés, respaldos de otros plugins).
+			'excludes'     => array_values( array_merge( $this->meta['excludes'], array( self::storage_rel() ) ) ),
 		);
 	}
 
